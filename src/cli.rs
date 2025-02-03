@@ -9,7 +9,6 @@
 //
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use clap::crate_authors;
 use clap::Arg;
@@ -48,17 +47,26 @@ pub fn cli() -> Command {
                 .long("package")
                 .short('p')
                 .value_name("PKG")
-                .help("Only list releases for package PKG"),
+                .help("List only releases for package PKG"),
+        )
+        .arg(
+            Arg::new("limit")
+                .required(false)
+                .long("limit")
+                .short('L')
+                .value_name("LIMIT")
+                .help("List newest LIMIT releases (0=unlimited)")
+                .value_parser(clap::value_parser!(usize)),
         );
 
     Command::new("butido")
         .author(crate_authors!())
         .disable_version_flag(true)
-        .about("Generic Build Orchestration System for building Linux packages with Docker")
+        .about("Generic build orchestration system for building Linux packages with Docker")
         .after_help(indoc::indoc!(r#"
             The following environment variables can be passed to butido:
 
-                RUST_LOG - to enable logging, for exact usage see the rust cookbook
+                RUST_LOG - to enable logging, for exact usage see the Rust cookbook
         "#))
 
         .arg(Arg::new("version")
@@ -67,6 +75,13 @@ pub fn cli() -> Command {
             .short('V')
             .long("version")
             .help("Detailed version output with build information")
+        )
+
+        .arg(Arg::new("tracing-chrome")
+            .action(ArgAction::SetTrue)
+            .required(false)
+            .long("tracing-chrome")
+            .help("Generate a Chrome compatible trace file (trace-*.json)")
         )
 
         .arg(Arg::new("hide_bars")
@@ -83,7 +98,7 @@ pub fn cli() -> Command {
             .help("Override the database host")
             .long_help(indoc::indoc!(r#"
                 Override the database host set via configuration.
-                Can also be overriden via environment variable 'BUTIDO_DATABASE_HOST', but this setting has precedence.
+                Can also be overridden via environment variable 'BUTIDO_DATABASE_HOST', but this setting has precedence.
             "#))
         )
         .arg(Arg::new("database_port")
@@ -93,8 +108,9 @@ pub fn cli() -> Command {
             .help("Override the database port")
             .long_help(indoc::indoc!(r#"
                 Override the database port set via configuration.
-                Can also be overriden via environment 'BUTIDO_DATABASE_PORT', but this setting has precedence.
+                Can also be overridden via environment 'BUTIDO_DATABASE_PORT', but this setting has precedence.
             "#))
+            .value_parser(clap::value_parser!(u16))
         )
         .arg(Arg::new("database_user")
             .required(false)
@@ -103,7 +119,7 @@ pub fn cli() -> Command {
             .help("Override the database user")
             .long_help(indoc::indoc!(r#"
                 Override the database user set via configuration.
-                Can also be overriden via environment 'BUTIDO_DATABASE_USER', but this setting has precedence.
+                Can also be overridden via environment 'BUTIDO_DATABASE_USER', but this setting has precedence.
             "#))
         )
         .arg(Arg::new("database_password")
@@ -114,7 +130,7 @@ pub fn cli() -> Command {
             .help("Override the database password")
             .long_help(indoc::indoc!(r#"
                 Override the database password set via configuration.
-                Can also be overriden via environment 'BUTIDO_DATABASE_PASSWORD', but this setting has precedence.
+                Can also be overridden via environment 'BUTIDO_DATABASE_PASSWORD', but this setting has precedence.
             "#))
         )
         .arg(Arg::new("database_name")
@@ -124,18 +140,19 @@ pub fn cli() -> Command {
             .help("Override the database name")
             .long_help(indoc::indoc!(r#"
                 Override the database name set via configuration.
-                Can also be overriden via environment 'BUTIDO_DATABASE_NAME', but this setting has precedence.
+                Can also be overridden via environment 'BUTIDO_DATABASE_NAME', but this setting has precedence.
             "#))
         )
         .arg(Arg::new("database_connection_timeout")
             .required(false)
             .long("db-timeout")
             .value_name("TIMEOUT")
-            .help("Override the database connection timeout")
+            .help("Override the database connection timeout (in seconds)")
             .long_help(indoc::indoc!(r#"
                 Override the database connection timeout set via configuration.
-                Can also be overriden via environment 'BUTIDO_DATABASE_CONNECTION_TIMEOUT', but this setting has precedence.
+                Can also be overridden via environment 'BUTIDO_DATABASE_CONNECTION_TIMEOUT', but this setting has precedence.
             "#))
+            .value_parser(clap::value_parser!(u16))
         )
 
         .subcommand(Command::new("generate-completions")
@@ -191,13 +208,15 @@ pub fn cli() -> Command {
                     .short('J')
                     .value_name("JOB UUID")
                     .help("Print only artifacts for a certain job")
+                    .value_parser(uuid::Uuid::parse_str)
                 )
                 .arg(Arg::new("limit")
                     .required(false)
                     .long("limit")
                     .short('L')
                     .value_name("LIMIT")
-                    .help("Only list LIMIT artifacts")
+                    .help("List newest LIMIT artifacts (0=unlimited)")
+                    .value_parser(clap::value_parser!(usize))
                 )
             )
 
@@ -227,7 +246,8 @@ pub fn cli() -> Command {
                     .required(true)
                     .index(1)
                     .value_name("SUBMIT")
-                    .help("The Submit to show details about")
+                    .help("The submit to show details about")
+                    .value_parser(uuid::Uuid::parse_str)
                 )
             )
 
@@ -258,7 +278,8 @@ pub fn cli() -> Command {
                     .long("limit")
                     .short('L')
                     .value_name("LIMIT")
-                    .help("Only list LIMIT submits")
+                    .help("List newest LIMIT submits (0=unlimited)")
+                    .value_parser(clap::value_parser!(usize))
                 )
                 .arg(Arg::new("for-commit")
                     .required(false)
@@ -268,6 +289,7 @@ pub fn cli() -> Command {
                 )
                 .arg(Arg::new("image")
                     .required(false)
+                    .short('I')
                     .long("image")
                     .value_name("IMAGE")
                     .help("Limit listed submits to submits on IMAGE")
@@ -289,6 +311,7 @@ pub fn cli() -> Command {
                     .short('S')
                     .value_name("UUID")
                     .help("Only list jobs of a certain submit")
+                    .value_parser(uuid::Uuid::parse_str)
                 )
 
                 .arg(Arg::new("image")
@@ -312,7 +335,8 @@ pub fn cli() -> Command {
                     .long("limit")
                     .short('L')
                     .value_name("LIMIT")
-                    .help("Only list newest LIMIT jobs instead of all")
+                    .help("List newest LIMIT jobs (0=unlimited)")
+                    .value_parser(clap::value_parser!(usize))
                 )
 
                 .arg(arg_older_than_date("List only jobs older than DATE"))
@@ -350,6 +374,7 @@ pub fn cli() -> Command {
                     .index(1)
                     .value_name("UUID")
                     .help("The job to show")
+                    .value_parser(uuid::Uuid::parse_str)
                 )
 
                 .arg(Arg::new("show_log")
@@ -387,7 +412,8 @@ pub fn cli() -> Command {
                     .required(true)
                     .index(1)
                     .value_name("UUID")
-                    .help("The id of the Job")
+                    .help("The job to print the log of")
+                    .value_parser(uuid::Uuid::parse_str)
                 )
             )
             .subcommand(releases_list_command.clone())
@@ -504,7 +530,7 @@ pub fn cli() -> Command {
         )
         .subcommand(Command::new("dependencies-of")
             .alias("depsof")
-            .about("List the depenendcies of a package")
+            .about("List the dependencies of a package")
             .arg(Arg::new("package_name")
                 .required(true)
                 .index(1)
@@ -515,7 +541,7 @@ pub fn cli() -> Command {
                 .required(false)
                 .index(2)
                 .value_name("VERSION_CONSTRAINT")
-                .help("A version constraint to search for (optional), E.G. '=1.0.0'")
+                .help("A version constraint to search for (optional), e.g., '=1.0.0'")
             )
             .arg(Arg::new("dependency_type")
                 .required(false)
@@ -553,11 +579,11 @@ pub fn cli() -> Command {
                 .value_name("PACKAGE_NAME")
                 .help("The name of the package")
             )
-            .arg(Arg::new("package_version_constraint")
+            .arg(Arg::new("package_version")
                 .required(true)
                 .index(2)
-                .value_name("VERSION_CONSTRAINT")
-                .help("A version constraint to search for (optional), E.G. '=1.0.0'")
+                .value_name("PACKAGE_VERSION")
+                .help("The version of the package")
             )
         )
 
@@ -573,21 +599,21 @@ pub fn cli() -> Command {
                 .required(false)
                 .index(2)
                 .value_name("VERSION_CONSTRAINT")
-                .help("A version constraint to search for (optional), E.G. '=1.0.0'")
+                .help("A version constraint to match the package version against (optional), e.g., '=1.0.0'")
             )
             .arg(Arg::new("no_script_filter")
                 .action(ArgAction::SetTrue)
                 .long("no-script-filter")
                 .short('S')
                 .required(false)
-                .help("Don't check for script equality. Can cause unexact results.")
+                .help("Don't check for script equality. Can cause inexact results.")
             )
             .arg(Arg::new("staging_dir")
                 .required(false)
                 .long("staging-dir")
                 .value_name("PATH")
                 .value_parser(dir_exists_validator)
-                .help("Also consider this staging dir when searching for artifacts")
+                .help("Also consider this staging directory when searching for artifacts")
             )
             .arg(Arg::new("env_filter")
                 .required(false)
@@ -619,7 +645,7 @@ pub fn cli() -> Command {
                 .required(false)
                 .index(2)
                 .value_name("VERSION_CONSTRAINT")
-                .help("A version constraint to search for (optional), E.G. '=1.0.0'")
+                .help("A version constraint to match the package version against (optional), e.g., '=1.0.0'")
             )
 
             .arg(Arg::new("terse")
@@ -740,11 +766,11 @@ pub fn cli() -> Command {
                     .value_name("PKG")
                     .help("Verify the sources of this package (optional, if left out, all packages are checked)")
                 )
-                .arg(Arg::new("package_version")
+                .arg(Arg::new("package_version_constraint")
                     .required(false)
                     .index(2)
-                    .value_name("VERSION")
-                    .help("Verify the sources of this package version (optional, if left out, all packages are checked)")
+                    .value_name("VERSION_CONSTRAINT")
+                    .help("Verify the sources of matching package versions (optional, if left out, all versions are checked)")
                 )
 
                 .arg(Arg::new("matching")
@@ -768,13 +794,13 @@ pub fn cli() -> Command {
                     .required(false)
                     .index(1)
                     .value_name("PKG")
-                    .help("Verify the sources of this package (optional, if left out, all packages are checked)")
+                    .help("Show the URL of this package (or all packages, if omitted)")
                 )
-                .arg(Arg::new("package_version")
+                .arg(Arg::new("package_version_constraint")
                     .required(false)
                     .index(2)
-                    .value_name("VERSION")
-                    .help("Verify the sources of this package version (optional, if left out, all packages are checked)")
+                    .value_name("VERSION_CONSTRAINT")
+                    .help("Show the URLs of matching package versions (or all versions, if omitted)")
                 )
             )
             .subcommand(Command::new("download")
@@ -785,24 +811,24 @@ pub fn cli() -> Command {
                     .value_name("PKG")
                     .help("Download the sources of this package")
                 )
-                .arg(Arg::new("package_version")
+                .arg(Arg::new("package_version_constraint")
                     .required(false)
                     .index(2)
                     .value_name("VERSION_CONSTRAINT")
-                    .help("Download the sources of this package version (optional, if left out, all packages are downloaded)")
+                    .help("Download the sources of matching package versions (optional, if left out, all versions are downloaded)")
                 )
                 .arg(Arg::new("force")
                     .action(ArgAction::SetTrue)
                     .required(false)
                     .long("force")
-                    .help("Overwrite existing cache entry")
+                    .help("Overwrite existing cache entry (the downloaded source file(s) will be deleted before the re-download starts)")
                 )
 
                 .arg(Arg::new("matching")
                     .required(false)
                     .long("matching")
                     .value_name("REGEX")
-                    .help("Download all packages matching a regex with their name")
+                    .help("Download all packages where the package name matches REGEX")
                 )
 
                 .group(ArgGroup::new("download-one-or-many")
@@ -815,21 +841,22 @@ pub fn cli() -> Command {
                     .long("timeout")
                     .value_name("TIMEOUT")
                     .help("Set timeout for download in seconds")
+                    .value_parser(clap::value_parser!(u64))
                 )
             )
             .subcommand(Command::new("of")
-                .about("Get the pathes of the sources of a package")
+                .about("Get the paths of the sources of a package")
                 .arg(Arg::new("package_name")
                     .required(false)
                     .index(1)
                     .value_name("PKG")
-                    .help("Get the source file pathes for this package")
+                    .help("Get the source file paths for this package (or all packages, if omitted)")
                 )
-                .arg(Arg::new("package_version")
+                .arg(Arg::new("package_version_constraint")
                     .required(false)
                     .index(2)
-                    .value_name("VERSION")
-                    .help("Get the source file pathes for the package in this version")
+                    .value_name("VERSION_CONSTRAINT")
+                    .help("Get the source file paths for the package in matching versions (or all versions, if omitted)")
                 )
             )
         )
@@ -853,7 +880,7 @@ pub fn cli() -> Command {
                 )
 
                 .arg(Arg::new("package_name")
-                    .required(false)
+                    .required(true)
                     .index(1)
                     .value_name("PKG")
                     .help("The name of the package")
@@ -861,7 +888,7 @@ pub fn cli() -> Command {
                 )
 
                 .arg(Arg::new("package_version")
-                    .required(false)
+                    .required(true)
                     .index(2)
                     .value_name("VERSION")
                     .help("The exact version of the package (string match)")
@@ -875,7 +902,8 @@ pub fn cli() -> Command {
                     .required(true)
                     .index(1)
                     .value_name("SUBMIT")
-                    .help("The submit uuid from which to release a package")
+                    .help("The submit UUID from which to release a package")
+                    .value_parser(uuid::Uuid::parse_str)
                 )
                 .arg(Arg::new("release_store_name")
                     .required(true)
@@ -891,18 +919,7 @@ pub fn cli() -> Command {
                     .required(false)
                     .index(2)
                     .value_name("PKG")
-                    .help("The name of the package")
-                    .conflicts_with("all-packages")
-                )
-                .arg(Arg::new("all-packages")
-                    .required(false)
-                    .long("all")
-                    .help("Release all packages")
-                    .conflicts_with("package_name")
-                )
-                .group(ArgGroup::new("package")
-                    .args(["package_name", "all-packages"])
-                    .required(true) // one of these is required
+                    .help("The name of the package (or, if omitted, release all packages of the submit)")
                 )
                 .arg(Arg::new("package_version")
                     .required(false)
@@ -920,7 +937,7 @@ pub fn cli() -> Command {
                     .action(ArgAction::SetTrue)
                     .required(false)
                     .long("non-interactive")
-                    .help("Dont be interactive (only with --update at the moment)")
+                    .help("Don't be interactive (only with --update at the moment)")
                     .requires("package_do_update")
                 )
                 .arg(Arg::new("quiet")
@@ -928,7 +945,7 @@ pub fn cli() -> Command {
                     .required(false)
                     .long("quiet")
                     .short('q')
-                    .help("Don't print pathes to released filesfiles  after releases are complete")
+                    .help("Don't print the paths to released files after releases are complete")
                 )
             )
 
@@ -940,13 +957,13 @@ pub fn cli() -> Command {
                 .required(false)
                 .index(1)
                 .value_name("NAME")
-                .help("Package name to lint (if not present, every package will be linted")
+                .help("Package name to lint (if not present, every package will be linted)")
             )
-            .arg(Arg::new("package_version")
+            .arg(Arg::new("package_version_constraint")
                 .required(false)
                 .index(2)
                 .value_name("VERSION_CONSTRAINT")
-                .help("A version constraint to search for (optional), E.G. '=1.0.0'")
+                .help("A version constraint to match the package version against (optional), e.g., '=1.0.0'")
             )
         )
 
@@ -956,13 +973,13 @@ pub fn cli() -> Command {
                 .required(true)
                 .index(1)
                 .value_name("NAME")
-                .help("Package name to lint (if not present, every package will be linted")
+                .help("Package name to print the dependency tree of")
             )
-            .arg(Arg::new("package_version")
+            .arg(Arg::new("package_version_constraint")
                 .required(false)
                 .index(2)
                 .value_name("VERSION_CONSTRAINT")
-                .help("A version constraint to search for (optional), E.G. '=1.0.0'")
+                .help("A version constraint to search for (optional), e.g., '=1.0.0'")
             )
             .arg(Arg::new("image")
                 .required(false)
@@ -991,6 +1008,30 @@ pub fn cli() -> Command {
                     conditions on dependencies.
                 "#))
             )
+            .arg(Arg::new("dot")
+                .action(ArgAction::SetTrue)
+                .required(false)
+                .long("dot")
+                .help("Output the dependency DAG in the Graphviz DOT format")
+                .conflicts_with("serial-buildorder")
+            )
+            .arg(Arg::new("serial-buildorder")
+                .action(ArgAction::SetTrue)
+                .required(false)
+                .long("serial-buildorder")
+                .help("Output the dependencies in a serial build order (flattened tree)")
+                .long_help(indoc::indoc!(r#"
+                    A serial build order ensures that dependencies are built one at a time
+                    in a specific sequence. This approach follows a reversed topological ordering,
+                    where dependencies (or children) are listed and built first. Each dependency
+                    must be fully built before the next one begins, ensuring all components are
+                    available when needed.
+
+                    Keep in mind that the actual build order remains parallel, this serialized
+                    output is mainly useful for debugging purposes.
+                "#))
+                .conflicts_with("dot")
+            )
         )
 
         .subcommand(Command::new("metrics")
@@ -998,7 +1039,7 @@ pub fn cli() -> Command {
         )
 
         .subcommand(Command::new("endpoint")
-            .about("Endpoint maintentance commands")
+            .about("Endpoint maintenance commands")
             .arg(Arg::new("endpoint_name")
                 .required(false)
                 .index(1)
@@ -1015,6 +1056,7 @@ pub fn cli() -> Command {
                     .value_name("N")
                     .default_value("10")
                     .help("How often to ping")
+                    .value_parser(clap::value_parser!(u64))
                 )
                 .arg(Arg::new("ping_sleep")
                     .required(false)
@@ -1022,6 +1064,7 @@ pub fn cli() -> Command {
                     .value_name("N")
                     .default_value("1")
                     .help("How long to sleep between pings")
+                    .value_parser(clap::value_parser!(u64))
                 )
             )
             .subcommand(Command::new("stats")
@@ -1050,7 +1093,7 @@ pub fn cli() -> Command {
                         .short('t')
                         .value_name("TIMEOUT")
                         .help("Timeout in seconds")
-                        .value_parser(parse_u64)
+                        .value_parser(clap::value_parser!(u64))
                     )
                 )
                 .subcommand(Command::new("list")
@@ -1071,6 +1114,7 @@ pub fn cli() -> Command {
 
                     .arg(Arg::new("filter_image")
                         .required(false)
+                        .short('I')
                         .long("image")
                         .value_name("IMAGE")
                         .help("List only containers of IMAGE")
@@ -1092,7 +1136,7 @@ pub fn cli() -> Command {
                         .long("limit")
                         .value_name("LIMIT")
                         .help("Only list LIMIT processes for each container")
-                        .value_parser(parse_usize)
+                        .value_parser(clap::value_parser!(usize))
                     )
                 )
             )
@@ -1134,7 +1178,8 @@ pub fn cli() -> Command {
                         .required(false)
                         .long("timeout")
                         .value_name("DURATION")
-                        .help("Timeout")
+                        .help("Timeout in seconds")
+                        .value_parser(clap::value_parser!(u64))
                     )
                 )
                 .subcommand(Command::new("exec")
@@ -1244,7 +1289,7 @@ fn env_pass_validator(s: &str) -> Result<String, String> {
             Err(s)
         }
         Ok((k, v)) => {
-            debug!("Env pass valiation: '{}={}'", k, v);
+            debug!("Env pass validation: '{}={}'", k, v);
             Ok(s.to_owned())
         }
     }
@@ -1333,18 +1378,6 @@ fn parse_date_from_string(s: &str) -> std::result::Result<String, String> {
                 .map_err(|e| e.to_string())
                 .map(|_| ())
         })
-        .map(|_| s.to_owned())
-}
-
-fn parse_usize(s: &str) -> std::result::Result<String, String> {
-    usize::from_str(s)
-        .map_err(|e| e.to_string())
-        .map(|_| s.to_owned())
-}
-
-fn parse_u64(s: &str) -> std::result::Result<String, String> {
-    u64::from_str(s)
-        .map_err(|e| e.to_string())
         .map(|_| s.to_owned())
 }
 

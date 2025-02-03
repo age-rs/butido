@@ -9,8 +9,12 @@
 //
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use getset::Getters;
 use serde::Deserialize;
 use serde::Serialize;
@@ -20,6 +24,7 @@ use crate::package::name::*;
 use crate::package::source::*;
 use crate::package::version::*;
 use crate::package::{Phase, PhaseName};
+use crate::repository::normalize_relative_path;
 use crate::util::docker::ImageName;
 use crate::util::EnvironmentVariableName;
 
@@ -100,6 +105,47 @@ impl Package {
         }
     }
 
+    pub fn display_name_version(&self) -> String {
+        format!("{} {}", self.name, self.version)
+    }
+
+    // A function to prepend the path of the origin/base directory (where the `pkg.toml` file that
+    // defined the "patches" resides in) to the relative paths of the patches (it usually only
+    // makes sense to call this function once!):
+    pub fn set_patches_base_dir(&mut self, origin_dir: &Path, root_dir: &Path) -> Result<()> {
+        // origin_dir: The path to the directory of the pkg.toml file where the patches are declared
+        // root_dir: The root directory of the packages repository
+        for patch in self.patches.iter_mut() {
+            // Prepend the path of the directory of the `pkg.toml` file to the relative path of the
+            // patch file:
+            let mut path = origin_dir.join(patch.as_path());
+            // Ensure that we use relative paths for the patches (the rest of the code that uses
+            // the patches doesn't work correctly with absolute paths):
+            if path.is_absolute() {
+                path = path
+                    .strip_prefix(root_dir)
+                    .map(|p| p.to_owned())
+                    .with_context(|| {
+                        anyhow!(
+                            "Cannot strip the prefix {} (root directory) form path {} (origin directory)",
+                            root_dir.display(),
+                            origin_dir.display()
+                        )
+                    })?;
+            }
+            if path.is_absolute() {
+                // The stripping of root_dir in the previous if branch didn't work:
+                return Err(anyhow!(
+                    "Bug: The path {} is absolute but it should be a relative path.",
+                    path.display()
+                ));
+            } else {
+                *patch = normalize_relative_path(path)?;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn set_dependencies(&mut self, dependencies: Dependencies) {
         self.dependencies = dependencies;
@@ -134,7 +180,7 @@ impl std::fmt::Debug for Package {
 pub struct DebugPackage<'a>(&'a Package);
 
 #[cfg(debug_assertions)]
-impl<'a> std::fmt::Debug for DebugPackage<'a> {
+impl std::fmt::Debug for DebugPackage<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         writeln!(
             f,
@@ -221,9 +267,6 @@ impl<'a> std::fmt::Debug for DebugPackage<'a> {
 }
 
 impl PartialEq for Package {
-    // Ignore the following lint as it results in a false positive with clippy 0.1.77
-    // (TODO: drop this once we bump the MSRV to 1.78):
-    #[allow(clippy::unconditional_recursion)]
     fn eq(&self, other: &Package) -> bool {
         (self.name(), self.version()).eq(&(other.name(), other.version()))
     }
@@ -276,11 +319,7 @@ impl Dependencies {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::package::Dependencies;
-    use crate::package::HashType;
-    use crate::package::HashValue;
-    use crate::package::Source;
-    use crate::package::SourceHash;
+
     use url::Url;
 
     /// helper function for quick object construction

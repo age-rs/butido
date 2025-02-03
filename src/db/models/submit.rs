@@ -13,7 +13,6 @@ use anyhow::Error;
 use anyhow::Result;
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
-use diesel::PgConnection;
 
 use crate::db::models::GitHash;
 use crate::db::models::Image;
@@ -81,6 +80,5 @@ impl Submit {
             .filter(submits::uuid.eq(submit_id))
             .first::<Submit>(database_connection)
             .context("Loading submit")
-            .map_err(Error::from)
     }
 }

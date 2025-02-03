@@ -9,8 +9,6 @@
 //
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -268,7 +266,6 @@ fn load_file(path: &Path) -> Result<String> {
     trace!("Reading {}", path.display());
     std::fs::read_to_string(path)
         .with_context(|| anyhow!("Reading file from filesystem: {}", path.display()))
-        .map_err(Error::from)
 }
 
 #[cfg(test)]

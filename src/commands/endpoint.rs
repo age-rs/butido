@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::ops::Deref;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -28,6 +27,7 @@ use tracing::{debug, info, trace};
 use crate::config::Configuration;
 use crate::config::EndpointName;
 use crate::endpoint::Endpoint;
+use crate::util::docker::ImageNameLookup;
 use crate::util::progress::ProgressBars;
 
 pub async fn endpoint(
@@ -71,16 +71,8 @@ async fn ping(
     config: &Configuration,
     progress_generator: ProgressBars,
 ) -> Result<()> {
-    let n_pings = matches
-        .get_one::<String>("ping_n")
-        .map(|s| s.parse::<u64>())
-        .transpose()?
-        .unwrap(); // safe by clap
-    let sleep = matches
-        .get_one::<String>("ping_sleep")
-        .map(|s| s.parse::<u64>())
-        .transpose()?
-        .unwrap(); // safe by clap
+    let n_pings = *matches.get_one::<u64>("ping_n").unwrap(); // safe by clap
+    let sleep = *matches.get_one::<u64>("ping_sleep").unwrap(); // safe by clap
     let endpoints = connect_to_endpoints(config, &endpoint_names).await?;
     let multibar = Arc::new({
         let mp = indicatif::MultiProgress::new();
@@ -93,11 +85,10 @@ async fn ping(
     endpoints
         .iter()
         .map(|endpoint| {
-            let bar = progress_generator.bar().map(|bar| {
+            let bar = progress_generator.bar().inspect(|bar| {
                 bar.set_length(n_pings);
                 bar.set_message(format!("Pinging {}", endpoint.name()));
                 multibar.add(bar.clone());
-                bar
             });
 
             async move {
@@ -140,6 +131,7 @@ async fn stats(
             "Name",
             "Containers",
             "Images",
+            "Id",
             "Kernel",
             "Memory",
             "Memory limit",
@@ -163,9 +155,8 @@ async fn stats(
         .collect::<futures::stream::FuturesUnordered<_>>()
         .collect::<Result<Vec<_>>>()
         .await
-        .map_err(|e| {
+        .inspect_err(|_| {
             bar.finish_with_message("Fetching stats errored");
-            e
         })?
         .into_iter()
         .map(|stat| {
@@ -173,6 +164,7 @@ async fn stats(
                 stat.name,
                 stat.containers.to_string(),
                 stat.images.to_string(),
+                stat.id.to_string(),
                 stat.kernel_version,
                 bytesize::ByteSize::b(stat.mem_total).to_string(),
                 stat.memory_limit.to_string(),
@@ -208,12 +200,25 @@ async fn containers_list(
     config: &Configuration,
 ) -> Result<()> {
     let list_stopped = matches.get_flag("list_stopped");
-    let filter_image = matches.get_one::<String>("filter_image");
+    let filter_image = if let Some(image) = matches.get_one::<String>("filter_image") {
+        let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
+        Some(image_name_lookup.expand(image)?.as_ref().to_string())
+    } else {
+        None
+    };
     let older_than_filter = crate::commands::util::get_date_filter("older_than", matches)?;
     let newer_than_filter = crate::commands::util::get_date_filter("newer_than", matches)?;
     let csv = matches.get_flag("csv");
     let hdr = crate::commands::util::mk_header(
-        ["Endpoint", "Container id", "Image", "Created", "Status"].to_vec(),
+        [
+            "Endpoint",
+            "Container id",
+            "Image",
+            "Image id",
+            "Created",
+            "Status",
+        ]
+        .to_vec(),
     );
 
     let data = connect_to_endpoints(config, &endpoint_names)
@@ -233,7 +238,12 @@ async fn containers_list(
             tpl.1
                 .into_iter()
                 .filter(|stat| list_stopped || stat.state != "exited")
-                .filter(|stat| filter_image.map(|fim| *fim == stat.image).unwrap_or(true))
+                .filter(|stat| {
+                    filter_image
+                        .as_ref()
+                        .map(|fim| *fim == stat.image)
+                        .unwrap_or(true)
+                })
                 .filter(|stat| {
                     older_than_filter
                         .as_ref()
@@ -247,10 +257,12 @@ async fn containers_list(
                         .unwrap_or(true)
                 })
                 .map(|stat| {
+                    // TODO: The output can become too wide (we should, e.g., try to shorten the IDs):
                     vec![
                         endpoint_name.as_ref().to_owned(),
                         stat.id,
                         stat.image,
+                        stat.image_id,
                         stat.created.to_string(),
                         stat.status,
                     ]
@@ -328,10 +340,7 @@ async fn containers_top(
     matches: &ArgMatches,
     config: &Configuration,
 ) -> Result<()> {
-    let limit = matches
-        .get_one::<String>("limit")
-        .map(|s| usize::from_str(s.as_ref()))
-        .transpose()?;
+    let limit = matches.get_one::<usize>("limit");
     let older_than_filter = crate::commands::util::get_date_filter("older_than", matches)?;
     let newer_than_filter = crate::commands::util::get_date_filter("newer_than", matches)?;
     let csv = matches.get_flag("csv");
@@ -376,7 +385,6 @@ async fn containers_top(
                 .top(None)
                 .await
                 .with_context(|| anyhow!("Fetching 'top' for {}", stat.id))
-                .map_err(Error::from)
                 .map(|top| (stat.id, top))
         })
         .collect::<futures::stream::FuturesUnordered<_>>()
@@ -386,7 +394,7 @@ async fn containers_top(
         .inspect(|(cid, _top)| trace!("Processing top of container: {}", cid))
         .map(|(container_id, top)| {
             let processes = if let Some(limit) = limit {
-                top.processes.into_iter().take(limit).collect()
+                top.processes.into_iter().take(*limit).collect()
             } else {
                 top.processes
             };
@@ -443,10 +451,8 @@ async fn containers_stop(
     let newer_than_filter = crate::commands::util::get_date_filter("newer_than", matches)?;
 
     let stop_timeout = matches
-        .get_one::<String>("timeout")
-        .map(|s| s.parse::<u64>())
-        .transpose()?
-        .map(std::time::Duration::from_secs);
+        .get_one::<u64>("timeout")
+        .map(|s| std::time::Duration::from_secs(*s));
 
     let stats = connect_to_endpoints(config, &endpoint_names)
         .await?

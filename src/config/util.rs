@@ -12,13 +12,11 @@
 //! configuration and having to use default values.
 
 /// The default progress bar format
+// Ignore a false positive Clippy warning (we pass this format string to
+// `indicatif::ProgressBars` as `bar_template` instead of evaluating it here):
+#[rustversion::attr(since(1.85), allow(clippy::literal_string_with_formatting_args))]
 pub fn default_progress_format() -> String {
-    String::from("[{elapsed_precise}] ({percent:>3}%): {bar:40.cyan/blue} | {msg}")
-}
-
-/// The default spinner format
-pub fn default_spinner_format() -> String {
-    String::from("[{elapsed_precise}] {spinner} | {msg}")
+    String::from("{elapsed_precise} {percent:>3}% {bar:5.cyan/blue} | {msg}")
 }
 
 /// The default format that is used to print one package
@@ -113,5 +111,16 @@ pub fn default_script_shebang() -> String {
 
 /// The default value for the number of log lines that should be printed if a build fails
 pub fn default_build_error_lines() -> usize {
+    10
+}
+
+/// The default value for the database connection timeout (in seconds)
+pub fn default_database_connection_timeout() -> u16 {
+    30
+}
+
+/// The default value for the number of results/rows that should be returned for DB queries that
+/// list things (LIMIT)
+pub fn default_database_query_limit() -> usize {
     10
 }

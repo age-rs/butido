@@ -12,7 +12,6 @@ use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use diesel::prelude::*;
-use diesel::PgConnection;
 
 use crate::schema::githashes;
 use crate::schema::githashes::*;
@@ -54,6 +53,5 @@ impl GitHash {
             .find(git_hash_id)
             .first::<_>(database_connection)
             .context("Loading GitHash")
-            .map_err(Error::from)
     }
 }

@@ -35,7 +35,8 @@ pub async fn release(
 ) -> Result<()> {
     match matches.subcommand() {
         Some(("list", matches)) => {
-            crate::commands::db::releases(db_connection_config, config, matches)
+            let default_limit = config.database_default_query_limit();
+            crate::commands::db::releases(db_connection_config, config, matches, default_limit)
         }
         Some(("new", matches)) => new_release(db_connection_config, config, matches).await,
         Some(("rm", matches)) => rm_release(db_connection_config, config, matches).await,
@@ -65,11 +66,7 @@ async fn new_release(
     debug!("Release called for: {:?} {:?}", pname, pvers);
 
     let pool = db_connection_config.establish_pool()?;
-    let submit_uuid = matches
-        .get_one::<String>("submit_uuid")
-        .map(|s| uuid::Uuid::parse_str(s.as_ref()))
-        .transpose()?
-        .unwrap(); // safe by clap
+    let submit_uuid = matches.get_one::<uuid::Uuid>("submit_uuid").unwrap(); // safe by clap
     debug!("Release called for submit: {:?}", submit_uuid);
 
     let submit = crate::schema::submits::dsl::submits
@@ -121,6 +118,10 @@ async fn new_release(
         }
     };
     debug!("Artifacts = {:?}", arts);
+
+    if arts.is_empty() {
+        return Err(anyhow!("No matching artifacts found to release"));
+    }
 
     arts.iter()
         .filter_map(|art| {
@@ -206,7 +207,6 @@ async fn new_release(
                     .with_context(|| {
                         anyhow!("Copying {} to {}", art_path.display(), dest_path.display())
                     })
-                    .map_err(Error::from)
                     .and_then(|_| {
                         debug!("Updating {:?} to set released = true", art);
                         let rel = crate::db::models::Release::create(

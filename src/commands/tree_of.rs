@@ -10,20 +10,20 @@
 
 //! Implementation of the 'tree-of' subcommand
 
-use std::convert::TryFrom;
-
 use anyhow::Error;
 use anyhow::Result;
 use clap::ArgMatches;
+use petgraph::dot::Dot;
 use resiter::AndThen;
 
 use crate::config::Configuration;
 use crate::package::condition::ConditionData;
 use crate::package::Dag;
+use crate::package::DependencyType;
 use crate::package::PackageName;
 use crate::package::PackageVersionConstraint;
 use crate::repository::Repository;
-use crate::util::docker::resolve_image_name;
+use crate::util::docker::ImageNameLookup;
 use crate::util::EnvironmentVariableName;
 
 /// Implementation of the "tree_of" subcommand
@@ -33,14 +33,15 @@ pub async fn tree_of(matches: &ArgMatches, repo: Repository, config: &Configurat
         .map(|s| s.to_owned())
         .map(PackageName::from);
     let pvers = matches
-        .get_one::<String>("package_version")
+        .get_one::<String>("package_version_constraint")
         .map(|s| s.to_owned())
         .map(PackageVersionConstraint::try_from)
         .transpose()?;
 
+    let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
     let image_name = matches
         .get_one::<String>("image")
-        .map(|s| resolve_image_name(s, config.docker().images()))
+        .map(|s| image_name_lookup.expand(s))
         .transpose()?;
 
     let additional_env = matches
@@ -55,6 +56,10 @@ pub async fn tree_of(matches: &ArgMatches, repo: Repository, config: &Configurat
         env: &additional_env,
     };
 
+    let dot = matches.get_flag("dot");
+
+    let serial_buildorder = matches.get_flag("serial-buildorder");
+
     repo.packages()
         .filter(|p| pname.as_ref().map(|n| p.name() == n).unwrap_or(true))
         .filter(|p| {
@@ -64,11 +69,45 @@ pub async fn tree_of(matches: &ArgMatches, repo: Repository, config: &Configurat
                 .unwrap_or(true)
         })
         .map(|package| Dag::for_root_package(package.clone(), &repo, None, &condition_data))
-        .and_then_ok(|tree| {
-            let stdout = std::io::stdout();
-            let mut outlock = stdout.lock();
+        .and_then_ok(|dag| {
+            if dot {
+                let dot = Dot::with_attr_getters(
+                    dag.dag(),
+                    &[
+                        petgraph::dot::Config::EdgeNoLabel,
+                        petgraph::dot::Config::NodeNoLabel,
+                    ],
+                    &|_, er| {
+                        format!(
+                            "{} ",
+                            match er.weight() {
+                                DependencyType::Build => "style = \"dotted\"",
+                                DependencyType::Runtime => "",
+                            }
+                        )
+                    },
+                    &|_, node| format!("label = \"{}\" ", node.1.display_name_version()),
+                );
 
-            ptree::write_tree(&tree.display(), &mut outlock).map_err(Error::from)
+                println!("{:?}", dot);
+                Ok(())
+            } else if serial_buildorder {
+                let topo_sorted = petgraph::algo::toposort(dag.dag(), None)
+                    .map_err(|_| Error::msg("Cyclic dependency found!"))?;
+
+                for node in topo_sorted.iter().rev() {
+                    let package = dag.dag().node_weight(*node).unwrap();
+                    println!("{}", package.display_name_version());
+                }
+                println!();
+
+                Ok(())
+            } else {
+                let stdout = std::io::stdout();
+                let mut outlock = stdout.lock();
+
+                ptree::write_tree(&dag.display(), &mut outlock).map_err(Error::from)
+            }
         })
         .collect::<Result<()>>()
 }

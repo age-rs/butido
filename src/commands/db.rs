@@ -10,7 +10,6 @@
 
 //! Implementation of the 'db' subcommand
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -32,7 +31,7 @@ use diesel_migrations::EmbeddedMigrations;
 use diesel_migrations::HarnessWithOutput;
 use diesel_migrations::MigrationHarness;
 use itertools::Itertools;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::commands::util::get_date_filter;
 use crate::config::Configuration;
@@ -41,7 +40,7 @@ use crate::db::DbConnectionConfig;
 use crate::log::JobResult;
 use crate::package::Script;
 use crate::schema;
-use crate::util::docker::resolve_image_name;
+use crate::util::docker::ImageNameLookup;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -51,18 +50,22 @@ pub fn db(
     config: &Configuration,
     matches: &ArgMatches,
 ) -> Result<()> {
+    let default_limit = config.database_default_query_limit();
+
     match matches.subcommand() {
         Some(("cli", matches)) => cli(db_connection_config, matches),
         Some(("setup", _matches)) => setup(db_connection_config),
-        Some(("artifacts", matches)) => artifacts(db_connection_config, matches),
+        Some(("artifacts", matches)) => artifacts(db_connection_config, matches, default_limit),
         Some(("envvars", matches)) => envvars(db_connection_config, matches),
         Some(("images", matches)) => images(db_connection_config, matches),
-        Some(("submit", matches)) => submit(db_connection_config, matches),
-        Some(("submits", matches)) => submits(db_connection_config, matches),
-        Some(("jobs", matches)) => jobs(db_connection_config, config, matches),
+        Some(("submit", matches)) => submit(db_connection_config, config, matches),
+        Some(("submits", matches)) => submits(db_connection_config, config, matches, default_limit),
+        Some(("jobs", matches)) => jobs(db_connection_config, config, matches, default_limit),
         Some(("job", matches)) => job(db_connection_config, config, matches),
         Some(("log-of", matches)) => log_of(db_connection_config, matches),
-        Some(("releases", matches)) => releases(db_connection_config, config, matches),
+        Some(("releases", matches)) => {
+            releases(db_connection_config, config, matches, default_limit)
+        }
         Some((other, _)) => Err(anyhow!("Unknown subcommand: {}", other)),
         None => Err(anyhow!("No subcommand")),
     }
@@ -92,12 +95,12 @@ fn cli(db_connection_config: DbConnectionConfig<'_>, matches: &ArgMatches) -> Re
                         info!("psql exited successfully");
                         Ok(())
                     } else {
-                        Err(anyhow!("psql did not exit successfully"))
-                            .with_context(|| match String::from_utf8(out.stderr) {
+                        Err(anyhow!("psql did not exit successfully")).with_context(|| {
+                            match String::from_utf8(out.stderr) {
                                 Ok(log) => anyhow!("{}", log),
                                 Err(e) => anyhow!("Cannot parse log into valid UTF-8: {}", e),
-                            })
-                            .map_err(Error::from)
+                            }
+                        })
                     }
                 })
         }
@@ -124,12 +127,12 @@ fn cli(db_connection_config: DbConnectionConfig<'_>, matches: &ArgMatches) -> Re
                         info!("pgcli exited successfully");
                         Ok(())
                     } else {
-                        Err(anyhow!("pgcli did not exit successfully"))
-                            .with_context(|| match String::from_utf8(out.stderr) {
+                        Err(anyhow!("pgcli did not exit successfully")).with_context(|| {
+                            match String::from_utf8(out.stderr) {
                                 Ok(log) => anyhow!("{}", log),
                                 Err(e) => anyhow!("Cannot parse log into valid UTF-8: {}", e),
-                            })
-                            .map_err(Error::from)
+                            }
+                        })
                     }
                 })
         }
@@ -160,19 +163,27 @@ fn setup(conn_cfg: DbConnectionConfig<'_>) -> Result<()> {
         .map_err(|e| anyhow!(e))
 }
 
+/// Helper function to get the LIMIT for DB queries based on the default value and CLI parameters
+fn get_limit(matches: &ArgMatches, default_limit: &usize) -> Result<i64> {
+    let limit = *matches.get_one::<usize>("limit").unwrap_or(default_limit);
+    if limit == 0 {
+        Ok(i64::MAX)
+    } else {
+        Ok(i64::try_from(limit)?)
+    }
+}
+
 /// Implementation of the "db artifacts" subcommand
-fn artifacts(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> {
+fn artifacts(
+    conn_cfg: DbConnectionConfig<'_>,
+    matches: &ArgMatches,
+    default_limit: &usize,
+) -> Result<()> {
     use crate::schema::artifacts::dsl;
 
     let csv = matches.get_flag("csv");
-    let job_uuid = matches
-        .get_one::<String>("job_uuid")
-        .map(|s| uuid::Uuid::parse_str(s.as_ref()))
-        .transpose()?;
-    let limit = matches
-        .get_one::<String>("limit")
-        .map(|s| s.parse::<i64>())
-        .transpose()?;
+    let job_uuid = matches.get_one::<uuid::Uuid>("job_uuid");
+    let limit = get_limit(matches, default_limit)?;
 
     let hdrs = crate::commands::util::mk_header(vec!["Path", "Released", "Job"]);
     let mut conn = conn_cfg.establish_connection()?;
@@ -180,12 +191,10 @@ fn artifacts(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<(
         .order_by(schema::artifacts::id.desc()) // required for the --limit implementation
         .inner_join(schema::jobs::table)
         .left_join(schema::releases::table)
-        .into_boxed();
+        .into_boxed()
+        .limit(limit);
     if let Some(job_uuid) = job_uuid {
         query = query.filter(schema::jobs::dsl::uuid.eq(job_uuid))
-    };
-    if let Some(limit) = limit {
-        query = query.limit(limit)
     };
 
     let data = query
@@ -254,16 +263,15 @@ fn images(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> 
 }
 
 /// Implementation of the "db submit" subcommand
-fn submit(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> {
+fn submit(
+    conn_cfg: DbConnectionConfig<'_>,
+    config: &Configuration,
+    matches: &ArgMatches,
+) -> Result<()> {
     let mut conn = conn_cfg.establish_connection()?;
-    let submit_id = matches
-        .get_one::<String>("submit")
-        .map(|s| uuid::Uuid::from_str(s.as_ref()))
-        .transpose()
-        .context("Parsing submit UUID")?
-        .unwrap(); // safe by clap
+    let submit_id = matches.get_one::<uuid::Uuid>("submit").unwrap(); // safe by clap
 
-    let submit = models::Submit::with_id(&mut conn, &submit_id)
+    let submit = models::Submit::with_id(&mut conn, submit_id)
         .with_context(|| anyhow!("Loading submit '{}' from DB", submit_id))?;
 
     let githash = models::GitHash::with_id(&mut conn, submit.repo_hash_id)
@@ -317,6 +325,8 @@ fn submit(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> 
         n_jobs_err = jobs_err.to_string().red(),
     )?;
 
+    let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
+
     let header = crate::commands::util::mk_header(
         [
             "Job",
@@ -350,7 +360,7 @@ fn submit(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> 
                 package.version.cyan(),
                 job.container_hash.normal(),
                 endpoint.name.normal(),
-                image.name.normal(),
+                image_name_lookup.shorten(&image.name).normal(),
             ])
         })
         .collect::<Result<Vec<Vec<colored::ColoredString>>>>()?;
@@ -358,12 +368,14 @@ fn submit(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> 
 }
 
 /// Implementation of the "db submits" subcommand
-fn submits(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> {
+fn submits(
+    conn_cfg: DbConnectionConfig<'_>,
+    config: &Configuration,
+    matches: &ArgMatches,
+    default_limit: &usize,
+) -> Result<()> {
     let csv = matches.get_flag("csv");
-    let limit = matches
-        .get_one::<String>("limit")
-        .map(|s| s.parse::<i64>())
-        .transpose()?;
+    let limit = get_limit(matches, default_limit)?;
     let hdrs = crate::commands::util::mk_header(vec![
         "Time",
         "UUID",
@@ -387,7 +399,9 @@ fn submits(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()>
     };
 
     let query = if let Some(image) = matches.get_one::<String>("image") {
-        query.filter(schema::images::name.eq(image))
+        let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
+        let image = image_name_lookup.expand(image)?;
+        query.filter(schema::images::name.eq(image.as_ref().to_string()))
     } else {
         query
     };
@@ -406,13 +420,8 @@ fn submits(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()>
             .inner_join(
                 schema::packages::table.on(schema::jobs::package_id.eq(schema::packages::id)),
             )
-            .filter(schema::packages::name.eq(&pkgname));
-
-        let query = if let Some(limit) = limit {
-            query.limit(limit)
-        } else {
-            query
-        };
+            .filter(schema::packages::name.eq(&pkgname))
+            .limit(limit);
 
         // Only load the IDs of the submits, so we can later use them to filter the submits
         let submit_ids = query.select(schema::submits::id).load::<i32>(&mut conn)?;
@@ -428,26 +437,12 @@ fn submits(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()>
             .load::<(models::Submit, models::Package)>(&mut conn)?
     } else if let Some(pkgname) = matches.get_one::<String>("for_pkg") {
         // Get all submits _for_ the package
-        let query = query
-            .inner_join({
-                schema::packages::table
-                    .on(schema::submits::requested_package_id.eq(schema::packages::id))
-            })
-            .filter(schema::packages::dsl::name.eq(&pkgname));
-
-        if let Some(limit) = limit {
-            query.limit(limit)
-        } else {
-            query
-        }
-        .select((schema::submits::all_columns, schema::packages::all_columns))
-        .load::<(models::Submit, models::Package)>(&mut conn)?
-    } else if let Some(limit) = limit {
         query
             .inner_join({
                 schema::packages::table
                     .on(schema::submits::requested_package_id.eq(schema::packages::id))
             })
+            .filter(schema::packages::dsl::name.eq(&pkgname))
             .select((schema::submits::all_columns, schema::packages::all_columns))
             .limit(limit)
             .load::<(models::Submit, models::Package)>(&mut conn)?
@@ -458,6 +453,7 @@ fn submits(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()>
                     .on(schema::submits::requested_package_id.eq(schema::packages::id))
             })
             .select((schema::submits::all_columns, schema::packages::all_columns))
+            .limit(limit)
             .load::<(models::Submit, models::Package)>(&mut conn)?
     };
 
@@ -491,10 +487,11 @@ fn jobs(
     conn_cfg: DbConnectionConfig<'_>,
     config: &Configuration,
     matches: &ArgMatches,
+    default_limit: &usize,
 ) -> Result<()> {
     let csv = matches.get_flag("csv");
     let hdrs = crate::commands::util::mk_header(vec![
-        "Submit", "Job", "Time", "Host", "Ok?", "Package", "Version", "Distro",
+        "Submit", "Job", "Time", "Host", "Ok?", "Package", "Version", "Distro", "Type",
     ]);
     let mut conn = conn_cfg.establish_connection()?;
     let older_than_filter = get_date_filter("older_than", matches)?;
@@ -505,19 +502,17 @@ fn jobs(
         .inner_join(schema::endpoints::table)
         .inner_join(schema::packages::table)
         .inner_join(schema::images::table)
+        .left_outer_join(schema::artifacts::table)
         .into_boxed();
 
-    if let Some(submit_uuid) = matches
-        .get_one::<String>("submit_uuid")
-        .map(|s| uuid::Uuid::parse_str(s.as_ref()))
-        .transpose()?
-    {
+    if let Some(submit_uuid) = matches.get_one::<uuid::Uuid>("submit_uuid") {
         sel = sel.filter(schema::submits::uuid.eq(submit_uuid))
     }
 
+    let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
     if let Some(image_name) = matches
         .get_one::<String>("image")
-        .map(|s| resolve_image_name(s, config.docker().images()))
+        .map(|s| image_name_lookup.expand(s))
         .transpose()?
     {
         sel = sel.filter(schema::images::name.eq(image_name.as_ref().to_string()))
@@ -559,14 +554,6 @@ fn jobs(
         sel = sel.filter(schema::submits::dsl::submit_time.gt(datetime))
     }
 
-    if let Some(limit) = matches
-        .get_one::<String>("limit")
-        .map(|s| s.parse::<i64>())
-        .transpose()?
-    {
-        sel = sel.limit(limit)
-    }
-
     if let Some(ep_name) = matches.get_one::<String>("endpoint") {
         sel = sel.filter(schema::endpoints::name.eq(ep_name))
     }
@@ -575,28 +562,38 @@ fn jobs(
         sel = sel.filter(schema::packages::name.eq(pkg_name))
     }
 
-    let mut image_short_name_map = HashMap::new();
-    for image in config.docker().images() {
-        image_short_name_map.insert(image.name.clone(), image.short_name.clone());
-    }
+    let limit = get_limit(matches, default_limit)?;
+
+    let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
 
     let data = sel
         .order_by(schema::jobs::id.desc()) // required for the --limit implementation
+        .limit(limit)
         .load::<(
             models::Job,
             models::Submit,
             models::Endpoint,
             models::Package,
             models::Image,
+            Option<models::Artifact>,
         )>(&mut conn)?
         .into_iter()
         .rev() // required for the --limit implementation
-        .map(|(job, submit, ep, package, image)| {
+        .map(|(job, submit, ep, package, image, artifact)| {
             let success = is_job_successfull(&job)?
                 .map(|b| if b { "yes" } else { "no" })
                 .map(String::from)
                 .unwrap_or_else(|| String::from("?"));
-            let image_name = crate::util::docker::ImageName::from(image.name);
+            let artifact_type = if let Some(artifact) = artifact {
+                artifact
+                    .path
+                    .split(".")
+                    .last()
+                    .map(str::to_uppercase)
+                    .unwrap_or(String::from("?"))
+            } else {
+                String::from("-")
+            };
 
             Ok(vec![
                 submit.uuid.to_string(),
@@ -606,10 +603,8 @@ fn jobs(
                 success,
                 package.name,
                 package.version,
-                image_short_name_map
-                    .get(&image_name)
-                    .unwrap_or(&image_name)
-                    .to_string(),
+                image_name_lookup.shorten(&image.name),
+                artifact_type,
             ])
         })
         .collect::<Result<Vec<_>>>()?;
@@ -636,11 +631,7 @@ fn job(
     let show_script = matches.get_flag("show_script");
     let csv = matches.get_flag("csv");
     let mut conn = conn_cfg.establish_connection()?;
-    let job_uuid = matches
-        .get_one::<String>("job_uuid")
-        .map(|s| uuid::Uuid::parse_str(s.as_ref()))
-        .transpose()?
-        .unwrap();
+    let job_uuid = matches.get_one::<uuid::Uuid>("job_uuid").unwrap();
 
     let data = schema::jobs::table
         .filter(schema::jobs::dsl::uuid.eq(job_uuid))
@@ -660,7 +651,7 @@ fn job(
     let parsed_log = crate::log::ParsedLog::from_str(&data.0.log_text)?;
     trace!("Parsed log = {:?}", parsed_log);
     let success = parsed_log.is_successfull();
-    trace!("log successfull = {:?}", success);
+    trace!("log successful = {:?}", success);
 
     if csv {
         let hdrs = crate::commands::util::mk_header(vec![
@@ -804,11 +795,7 @@ fn job(
 /// Implementation of the subcommand "db log-of"
 fn log_of(conn_cfg: DbConnectionConfig<'_>, matches: &ArgMatches) -> Result<()> {
     let mut conn = conn_cfg.establish_connection()?;
-    let job_uuid = matches
-        .get_one::<String>("job_uuid")
-        .map(|s| uuid::Uuid::parse_str(s.as_ref()))
-        .transpose()?
-        .unwrap();
+    let job_uuid = matches.get_one::<uuid::Uuid>("job_uuid").unwrap();
     let out = std::io::stdout();
     let mut lock = out.lock();
 
@@ -832,9 +819,11 @@ pub fn releases(
     conn_cfg: DbConnectionConfig<'_>,
     config: &Configuration,
     matches: &ArgMatches,
+    default_limit: &usize,
 ) -> Result<()> {
     let csv = matches.get_flag("csv");
     let mut conn = conn_cfg.establish_connection()?;
+    let limit = get_limit(matches, default_limit)?;
     let header = crate::commands::util::mk_header(["Package", "Version", "Date", "Path"].to_vec());
     let mut query = schema::jobs::table
         .inner_join(schema::packages::table)
@@ -846,9 +835,8 @@ pub fn releases(
             schema::release_stores::table
                 .on(schema::release_stores::id.eq(schema::releases::release_store_id)),
         )
-        .order_by(schema::packages::dsl::name.asc())
-        .then_order_by(schema::packages::dsl::version.asc())
-        .then_order_by(schema::releases::release_date.asc())
+        .order_by(schema::releases::id.desc()) // required for the --limit implementation
+        .limit(limit)
         .into_boxed();
 
     if let Some(date) = crate::commands::util::get_date_filter("older_than", matches)? {
@@ -882,28 +870,23 @@ pub fn releases(
             models::ReleaseStore,
         )>(&mut conn)?
         .into_iter()
-        .filter_map(|(art, pack, rel, rstore)| {
+        .map(|(art, pack, rel, rstore)| {
             let p = config
                 .releases_directory()
-                .join(rstore.store_name)
-                .join(art.path);
+                .join(&rstore.store_name)
+                .join(&art.path);
 
-            if p.is_file() {
-                Some(vec![
-                    pack.name,
-                    pack.version,
-                    rel.release_date.to_string(),
-                    p.display().to_string(),
-                ])
-            } else {
-                warn!(
-                    "Released file for {} {} not found: {}",
-                    pack.name,
-                    pack.version,
-                    p.display()
-                );
-                None
-            }
+            vec![
+                pack.name,
+                pack.version,
+                rel.release_date.to_string(),
+                if p.is_file() {
+                    p.display().to_string()
+                } else {
+                    let relative_path = PathBuf::from(rstore.store_name).join(art.path);
+                    format!("{} is not available locally", relative_path.display())
+                },
+            ]
         })
         .collect::<Vec<Vec<_>>>();
 

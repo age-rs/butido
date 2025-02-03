@@ -104,9 +104,9 @@ impl StoreRoot {
     /// Unpack a tar archive in this location
     ///
     /// This function unpacks the provided tar archive "butido-style" in the location pointed to by
-    /// `self` and returns the written pathes.
+    /// `self` and returns the written paths.
     ///
-    /// The function filteres out the "/output" directory (that's what is meant by "butido-style").
+    /// The function filters out the "/output" directory (that's what is meant by "butido-style").
     pub(in crate::filestore) fn unpack_archive_here<R>(
         &self,
         mut ar: tar::Archive<R>,
@@ -206,16 +206,14 @@ impl<'a> FullArtifactPath<'a> {
     pub async fn read(self) -> Result<Vec<u8>> {
         tokio::fs::read(self.joined())
             .await
-            .map(Vec::from)
             .with_context(|| anyhow!("Reading artifact from path {}", self.0.display()))
-            .map_err(Error::from)
     }
 }
 
 #[derive(Debug)]
 pub struct FullArtifactPathDisplay<'a>(&'a StoreRoot, &'a ArtifactPath);
 
-impl<'a> std::fmt::Display for FullArtifactPathDisplay<'a> {
+impl std::fmt::Display for FullArtifactPathDisplay<'_> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(fmt, "{}/{}", self.0.display(), self.1.display())
     }

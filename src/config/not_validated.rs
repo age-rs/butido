@@ -41,22 +41,16 @@ pub struct NotValidatedConfiguration {
     #[getset(get = "pub")]
     log_dir: PathBuf,
 
-    /// Whether the script interpolation feature should be struct, i.e. missing variables result in
+    /// Whether the script interpolation feature should be strict, i.e. missing variables result in
     /// a failing interpolation. This should be `true` for most users.
     #[serde(default = "default_strict_script_interpolation")]
     #[getset(get = "pub")]
     strict_script_interpolation: bool,
 
-    /// The format of the progress bars
+    /// The format of the progress status output for various operations
     #[serde(default = "default_progress_format")]
     #[getset(get = "pub")]
     progress_format: String,
-
-    /// The format of the spinners in the CLI
-    #[serde(default = "default_spinner_format")]
-    #[getset(get = "pub")]
-    #[allow(unused)]
-    spinner_format: String,
 
     /// The format used to print a package
     ///
@@ -89,7 +83,6 @@ pub struct NotValidatedConfiguration {
     releases_directory: PathBuf,
 
     /// The names of the directories inside the `releases_directory` to store different releases in
-    #[serde(rename = "release_stores")]
     #[getset(get = "pub")]
     release_stores: Vec<String>,
 
@@ -105,36 +98,38 @@ pub struct NotValidatedConfiguration {
     #[getset(get = "pub")]
     source_cache_root: PathBuf,
 
-    /// The hostname used to connect to the database
+    /// The hostname/FQDN/IP used to connect to the database
     #[getset(get = "pub")]
-    #[serde(rename = "database_host")]
     database_host: String,
 
-    /// The post used to connect to the database
+    /// The port used to connect to the database
     #[getset(get = "pub")]
-    #[serde(rename = "database_port")]
     database_port: u16,
 
     /// The user used to connect to the database
     #[getset(get = "pub")]
-    #[serde(rename = "database_user")]
     database_user: String,
 
     /// The password used to connect to the database
     #[getset(get = "pub")]
-    #[serde(rename = "database_password")]
     database_password: String,
 
     /// The name of the database
     #[getset(get = "pub")]
-    #[serde(rename = "database_name")]
     database_name: String,
 
-    /// The configuration for the Docker endpoints
+    /// The database connection timeout in seconds
     #[getset(get = "pub")]
-    #[serde(rename = "database_connection_timeout")]
-    database_connection_timeout: Option<u16>,
+    #[serde(default = "default_database_connection_timeout")]
+    database_connection_timeout: u16,
 
+    /// The default limit for database queries (when listing tables with the `db` subcommand;
+    /// 0=unlimited (not recommended as it might result in OOM kills))
+    #[serde(default = "default_database_query_limit")]
+    #[getset(get = "pub")]
+    database_default_query_limit: usize,
+
+    /// The configuration for the Docker endpoints and images
     #[getset(get = "pub")]
     docker: DockerConfig,
 
@@ -298,7 +293,7 @@ mod tests {
         assert!(changelog.is_ok());
         let changelog = changelog.unwrap();
         for i in 0..=CONFIGURATION_VERSION {
-            assert!(changelog.get(&i.to_string()).is_some());
+            assert!(changelog.contains_key(&i.to_string()));
         }
     }
 

@@ -42,7 +42,7 @@ Building butido is easy, assuming you have a Rust installation:
 cargo build --release # (remove --release for a debug build)
 ```
 
-Butido is built and tested with Rust 1.74.0 as MSRV.
+Butido is built and tested with Rust 1.80.0 as MSRV.
 
 
 ### (Development) Setup
@@ -103,6 +103,6 @@ cd /tmp/butido-test-repo
 
 # License
 
-butido was developed for science+computing ag (an Atos company).
+butido was developed for science + computing AG (an Atos company).
 
 License: EPL-2.0

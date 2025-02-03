@@ -11,7 +11,6 @@
 use anyhow::Error;
 use anyhow::Result;
 use clap::ArgMatches;
-use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::ConnectionManager;
 use diesel::r2d2::Pool;
@@ -41,7 +40,7 @@ pub struct DbConnectionConfig<'a> {
     database_connection_timeout: u16,
 }
 
-impl<'a> std::fmt::Debug for DbConnectionConfig<'a> {
+impl std::fmt::Debug for DbConnectionConfig<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
@@ -62,10 +61,8 @@ impl<'a> DbConnectionConfig<'a> {
                 .get_one::<String>("database_host")
                 .unwrap_or_else(|| config.database_host()),
             database_port: {
-                cli.get_one::<String>("database_port")
-                    .map(|s| s.parse::<u16>())
-                    .transpose()?
-                    .unwrap_or_else(|| *config.database_port())
+                *cli.get_one::<u16>("database_port")
+                    .unwrap_or_else(|| config.database_port())
             },
             database_user: cli
                 .get_one::<String>("database_user")
@@ -77,13 +74,8 @@ impl<'a> DbConnectionConfig<'a> {
                 .get_one::<String>("database_name")
                 .unwrap_or_else(|| config.database_name()),
             database_connection_timeout: {
-                cli.get_one::<String>("database_connection_timeout")
-                    .map(|s| s.parse::<u16>())
-                    .transpose()?
-                    .unwrap_or_else(|| {
-                        // hardcoded default of 30 seconds database timeout
-                        config.database_connection_timeout().unwrap_or(30)
-                    })
+                *cli.get_one::<u16>("database_connection_timeout")
+                    .unwrap_or_else(|| config.database_connection_timeout())
             },
         })
     }

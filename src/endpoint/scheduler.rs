@@ -19,12 +19,13 @@ use colored::Colorize;
 use diesel::r2d2::ConnectionManager;
 use diesel::r2d2::Pool;
 use diesel::PgConnection;
+use getset::{CopyGetters, Getters};
 use indicatif::ProgressBar;
 use itertools::Itertools;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
-use tracing::trace;
+use tracing::{debug, error, info, trace};
 use uuid::Uuid;
 
 use crate::db::models as dbmodels;
@@ -38,9 +39,12 @@ use crate::job::JobResource;
 use crate::job::RunnableJob;
 use crate::log::LogItem;
 
+#[derive(Getters, CopyGetters)]
 pub struct EndpointScheduler {
     log_dir: Option<PathBuf>,
     endpoints: Vec<Arc<Endpoint>>,
+    #[getset(get = "pub")]
+    max_endpoint_name_length: usize,
 
     staging_store: Arc<RwLock<StagingStore>>,
     release_stores: Vec<Arc<ReleaseStore>>,
@@ -58,10 +62,16 @@ impl EndpointScheduler {
         log_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let endpoints = crate::endpoint::util::setup_endpoints(endpoints).await?;
+        let max_endpoint_name_length = endpoints
+            .iter()
+            .map(|ep| ep.name().len())
+            .max()
+            .unwrap_or(0);
 
         Ok(EndpointScheduler {
             log_dir,
             endpoints,
+            max_endpoint_name_length,
             staging_store,
             release_stores,
             db,
@@ -85,6 +95,8 @@ impl EndpointScheduler {
             log_dir: self.log_dir.clone(),
             bar,
             endpoint,
+            container_id: None,
+            max_endpoint_name_length: self.max_endpoint_name_length,
             job,
             staging_store: self.staging_store.clone(),
             release_stores: self.release_stores.clone(),
@@ -125,9 +137,12 @@ impl EndpointScheduler {
     }
 }
 
+#[derive(Clone)]
 pub struct JobHandle {
     log_dir: Option<PathBuf>,
     endpoint: EndpointHandle,
+    container_id: Option<String>,
+    max_endpoint_name_length: usize,
     job: RunnableJob,
     bar: ProgressBar,
     db: Pool<ConnectionManager<PgConnection>>,
@@ -143,7 +158,7 @@ impl std::fmt::Debug for JobHandle {
 }
 
 impl JobHandle {
-    pub async fn run(self) -> Result<Result<Vec<ArtifactPath>>> {
+    pub async fn run(mut self) -> Result<Result<Vec<ArtifactPath>>> {
         let (log_sender, log_receiver) = tokio::sync::mpsc::unbounded_channel::<LogItem>();
         let endpoint_uri = self.endpoint.uri().clone();
         let endpoint_name = self.endpoint.name().clone();
@@ -169,6 +184,7 @@ impl JobHandle {
             )
             .await?;
         let container_id = prepared_container.create_info().id.clone();
+        self.container_id = Some(container_id.clone());
         let running_container = prepared_container
             .start()
             .await
@@ -185,16 +201,16 @@ impl JobHandle {
 
         let logres = LogReceiver {
             endpoint_name: endpoint_name.as_ref(),
+            max_endpoint_name_length: &self.max_endpoint_name_length,
             container_id_chrs: container_id.chars().take(7).collect(),
             package_name: &package.name,
             package_version: &package.version,
             log_dir: self.log_dir.as_ref(),
-            job: self.job,
+            job: &self.job,
             log_receiver,
             bar: self.bar.clone(),
         }
         .join();
-        drop(self.bar);
 
         let (run_container, logres) = tokio::join!(running_container, logres);
         let log =
@@ -262,8 +278,7 @@ impl JobHandle {
                     &endpoint_uri,
                     &container_id,
                 )
-            })
-            .map_err(Error::from);
+            });
 
         if res.is_err() {
             trace!("Error was returned from script");
@@ -357,21 +372,54 @@ impl JobHandle {
     }
 }
 
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        if let Some(container_id) = self.container_id.clone() {
+            debug!("Cleaning up JobHandle with job UUID: {}", self.job.uuid());
+            let docker = self.endpoint.docker().clone();
+
+            tokio::spawn(async move {
+                let container = docker.containers().get(&container_id);
+                debug!("Killing container with ID: {container_id}");
+
+                let container_info = container.inspect().await.unwrap();
+                if container_info.state.running {
+                    // We are killing the container here, since stopping the container can take ages
+                    // and wouldn't bring any benefit here
+                    match container.kill(None).await {
+                        Ok(_) => info!("Killed container with ID: {}", container_id),
+                        Err(e) => {
+                            error!(
+                                "Failed to stop container with ID: {}\nError: {}",
+                                container_id, e
+                            )
+                        }
+                    }
+                } else {
+                    debug!("Container with ID {} isn't running anymore", container_id);
+                }
+            });
+        } else {
+            debug!("No container ID set, skipping cleanup");
+        }
+    }
+}
+
 struct LogReceiver<'a> {
     endpoint_name: &'a str,
+    max_endpoint_name_length: &'a usize,
     container_id_chrs: String,
     package_name: &'a str,
     package_version: &'a str,
     log_dir: Option<&'a PathBuf>,
-    job: RunnableJob,
+    job: &'a RunnableJob,
     log_receiver: UnboundedReceiver<LogItem>,
     bar: ProgressBar,
 }
 
-impl<'a> LogReceiver<'a> {
+impl LogReceiver<'_> {
     async fn join(mut self) -> Result<String> {
         let mut success = None;
-
         // Reserve a reasonable amount of elements.
         let mut accu = Vec::with_capacity(4096);
 
@@ -389,6 +437,7 @@ impl<'a> LogReceiver<'a> {
         // Having a timeout of 1 sec proofed to be too long to update the time field in the
         // progress bar secondly.
         let timeout_duration = std::time::Duration::from_millis(250);
+        let max_endpoint_name_length = self.max_endpoint_name_length;
 
         loop {
             // Timeout for receiving from the log receiver channel
@@ -422,10 +471,11 @@ impl<'a> LogReceiver<'a> {
                 LogItem::CurrentPhase(ref phasename) => {
                     trace!("Setting bar phase to {}", phasename);
                     self.bar.set_message(format!(
-                        "[{}/{} {} {} {}]: Phase: {}",
+                        "{:<max_endpoint_name_length$} {} {} {} {} {} {}",
                         self.endpoint_name,
                         self.container_id_chrs,
                         self.job.uuid(),
+                        "\u{2588}\u{2588}".yellow(),
                         self.package_name,
                         self.package_version,
                         phasename
@@ -434,10 +484,11 @@ impl<'a> LogReceiver<'a> {
                 LogItem::State(Ok(())) => {
                     trace!("Setting bar state to Ok");
                     self.bar.set_message(format!(
-                        "[{}/{} {} {} {}]: State Ok",
+                        "{:<max_endpoint_name_length$} {} {} {} {} {}",
                         self.endpoint_name,
                         self.container_id_chrs,
                         self.job.uuid(),
+                        "\u{2588}\u{2588}".green(),
                         self.package_name,
                         self.package_version
                     ));
@@ -446,10 +497,11 @@ impl<'a> LogReceiver<'a> {
                 LogItem::State(Err(ref e)) => {
                     trace!("Setting bar state to Err: {}", e);
                     self.bar.set_message(format!(
-                        "[{}/{} {} {} {}]: State Err: {}",
+                        "{:<max_endpoint_name_length$} {} {} {} {} {} {}",
                         self.endpoint_name,
                         self.container_id_chrs,
                         self.job.uuid(),
+                        "\u{2588}\u{2588}".red(),
                         self.package_name,
                         self.package_version,
                         e
@@ -462,31 +514,20 @@ impl<'a> LogReceiver<'a> {
 
         trace!("Finishing bar = {:?}", success);
         let finish_msg = match success {
-            Some(true) => format!(
-                "[{}/{} {} {} {}]: finished successfully",
-                self.endpoint_name,
-                self.container_id_chrs,
-                self.job.uuid(),
-                self.package_name,
-                self.package_version
-            ),
-            Some(false) => format!(
-                "[{}/{} {} {} {}]: finished with error",
-                self.endpoint_name,
-                self.container_id_chrs,
-                self.job.uuid(),
-                self.package_name,
-                self.package_version
-            ),
-            None => format!(
-                "[{}/{} {} {} {}]: finished",
-                self.endpoint_name,
-                self.container_id_chrs,
-                self.job.uuid(),
-                self.package_name,
-                self.package_version
-            ),
+            Some(true) => "\u{2588}\u{2588}".green(),
+            Some(false) => "\u{2588}\u{2588}".red(),
+            None => "\u{2588}\u{2588}".blue(),
         };
+
+        let finish_msg = format!(
+            "{:<max_endpoint_name_length$} {} {} {} {} {}",
+            self.endpoint_name,
+            self.container_id_chrs,
+            self.job.uuid(),
+            finish_msg,
+            self.package_name,
+            self.package_version,
+        );
         self.bar.finish_with_message(finish_msg);
 
         if let Some(mut lf) = logfile {
@@ -518,7 +559,6 @@ impl<'a> LogReceiver<'a> {
                     .await
                     .map(tokio::io::BufWriter::new)
                     .with_context(|| anyhow!("Opening {}", path.display()))
-                    .map_err(Error::from)
             })
         } else {
             None

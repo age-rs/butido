@@ -8,14 +8,10 @@
 // SPDX-License-Identifier: EPL-2.0
 //
 
-// TODO: Is this really necessary?
-#![allow(clippy::format_push_string)]
-
 use std::process::ExitStatus;
 
 use anyhow::anyhow;
 use anyhow::Context as AnyhowContext;
-use anyhow::Error;
 use anyhow::Result;
 use handlebars::{
     Context, Handlebars, Helper, HelperDef, HelperResult, JsonRender, Output, PathAndJson,
@@ -247,15 +243,13 @@ impl<'a> ScriptBuilder<'a> {
             trace!("Rendering Package: {:?}", package.debug_details());
         }
 
-        hb.render("script", package)
-            .with_context(|| {
-                anyhow!(
-                    "Rendering script for package {} {} failed",
-                    package.name(),
-                    package.version()
-                )
-            })
-            .map_err(Error::from)
+        hb.render("script", package).with_context(|| {
+            anyhow!(
+                "Rendering script for package {} {} failed",
+                package.name(),
+                package.version()
+            )
+        })
     }
 }
 

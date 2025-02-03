@@ -16,6 +16,7 @@ use tracing::trace;
 
 use crate::package::Package;
 use crate::package::PackageName;
+use crate::package::PackageVersion;
 use crate::package::PackageVersionConstraint;
 use crate::package::ParseDependency;
 
@@ -27,7 +28,11 @@ pub fn build_package_filter_by_dependency_name(
 ) -> impl filters::failable::filter::FailableFilter<Package, Error = Error> {
     let n = name.clone(); // clone, so we can move into closure
     let filter_build_dep = move |p: &Package| -> Result<bool> {
-        trace!("Checking whether any build depenency of {:?} is '{}'", p, n);
+        trace!(
+            "Checking whether any build dependency of {:?} is '{}'",
+            p,
+            n
+        );
         Ok({
             check_build_dep
                 && p.dependencies()
@@ -46,7 +51,7 @@ pub fn build_package_filter_by_dependency_name(
     let n = name.clone(); // clone, so we can move into closure
     let filter_rt_dep = move |p: &Package| -> Result<bool> {
         trace!(
-            "Checking whether any runtime depenency of {:?} is '{}'",
+            "Checking whether any runtime dependency of {:?} is '{}'",
             p,
             n
         );
@@ -75,12 +80,28 @@ pub fn build_package_filter_by_name(name: PackageName) -> impl filters::filter::
     }
 }
 
-pub fn build_package_filter_by_version_constraint(
-    constraint: PackageVersionConstraint,
+pub fn build_package_filter_by_version(
+    version: PackageVersion,
 ) -> impl filters::filter::Filter<Package> {
     move |p: &Package| {
-        trace!("Checking {:?} -> version matches {:?}", p, constraint);
-        constraint.matches(p.version())
+        trace!("Checking {:?} -> version == {}", p, version);
+        *p.version() == version
+    }
+}
+
+pub fn build_package_filter_by_version_constraint(
+    version_constraint: Option<PackageVersionConstraint>,
+) -> impl filters::filter::Filter<Package> {
+    move |p: &Package| {
+        trace!(
+            "Checking {:?} -> version matches constraint: {:?}",
+            p,
+            version_constraint
+        );
+        version_constraint
+            .as_ref()
+            .map(|v| v.matches(p.version()))
+            .unwrap_or(true)
     }
 }
 
@@ -91,7 +112,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use resiter::Filter;
-    use resiter::Map;
 
     use crate::package::tests::package;
     use crate::package::tests::pname;

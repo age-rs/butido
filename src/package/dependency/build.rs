@@ -14,9 +14,8 @@ use serde::Serialize;
 
 use crate::package::dependency::condition::Condition;
 use crate::package::dependency::ParseDependency;
-use crate::package::dependency::StringEqual;
 use crate::package::PackageName;
-use crate::package::PackageVersionConstraint;
+use crate::package::PackageVersion;
 
 /// A dependency that is packaged and is only required during build time
 #[derive(Serialize, Deserialize, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -35,17 +34,8 @@ impl AsRef<str> for BuildDependency {
     }
 }
 
-impl StringEqual for BuildDependency {
-    fn str_equal(&self, s: &str) -> bool {
-        match self {
-            BuildDependency::Simple(name) => name == s,
-            BuildDependency::Conditional { name, .. } => name == s,
-        }
-    }
-}
-
 impl ParseDependency for BuildDependency {
-    fn parse_as_name_and_version(&self) -> Result<(PackageName, PackageVersionConstraint)> {
+    fn parse_as_name_and_version(&self) -> Result<(PackageName, PackageVersion)> {
         crate::package::dependency::parse_package_dependency_string_into_name_and_version(
             self.as_ref(),
         )

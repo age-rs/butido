@@ -8,7 +8,7 @@
 // SPDX-License-Identifier: EPL-2.0
 //
 
-use std::convert::TryFrom;
+use std::concat;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use clap::ArgMatches;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 
 use crate::config::*;
 use crate::package::PackageName;
@@ -30,6 +30,7 @@ use crate::source::*;
 use crate::util::progress::ProgressBars;
 
 const NUMBER_OF_MAX_CONCURRENT_DOWNLOADS: usize = 100;
+const APP_USER_AGENT: &str = concat! {env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")};
 
 /// A wrapper around the indicatif::ProgressBar
 ///
@@ -85,11 +86,15 @@ impl ProgressWrapper {
 
     async fn set_message(&self) {
         let bar = self.bar.lock().await;
-        bar.set_message(format!("Downloading ({current_bytes}/{sum_bytes} bytes, {dlfinished}/{dlsum} downloads finished)",
-                current_bytes = self.current_bytes,
-                sum_bytes = self.sum_bytes,
-                dlfinished = self.finished_downloads,
-                dlsum = self.download_count));
+        let current_mbytes = (self.current_bytes as f64) / 1_000_000_f64;
+        let sum_mbytes = (self.sum_bytes as f64) / 1_000_000_f64;
+        bar.set_message(format!(
+            "Downloading ({:.2}/{:.2} MB, {dlfinished}/{dlsum} downloads finished)",
+            current_mbytes,
+            sum_mbytes,
+            dlfinished = self.finished_downloads,
+            dlsum = self.download_count
+        ));
     }
 
     async fn success(&self) {
@@ -116,8 +121,9 @@ async fn perform_download(
 ) -> Result<()> {
     trace!("Downloading: {:?}", source);
 
-    let client_builder =
-        reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10));
+    let client_builder = reqwest::Client::builder()
+        .user_agent(APP_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10));
 
     let client_builder = if let Some(to) = timeout {
         client_builder.timeout(std::time::Duration::from_secs(to))
@@ -203,11 +209,7 @@ pub async fn download(
     progressbars: ProgressBars,
 ) -> Result<()> {
     let force = matches.get_flag("force");
-    let timeout = matches
-        .get_one::<String>("timeout")
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .context("Parsing timeout argument to integer")?;
+    let timeout = matches.get_one::<u64>("timeout").copied();
     let cache = PathBuf::from(config.source_cache_root());
     let sc = SourceCache::new(cache);
     let pname = matches
@@ -215,7 +217,7 @@ pub async fn download(
         .map(|s| s.to_owned())
         .map(PackageName::from);
     let pvers = matches
-        .get_one::<String>("package_version")
+        .get_one::<String>("package_version_constraint")
         .map(|s| s.to_owned())
         .map(PackageVersionConstraint::try_from)
         .transpose()?;
@@ -231,38 +233,8 @@ pub async fn download(
         NUMBER_OF_MAX_CONCURRENT_DOWNLOADS,
     ));
 
-    let mut r = repo.packages()
-        .filter(|p| {
-            match (pname.as_ref(), pvers.as_ref(), matching_regexp.as_ref()) {
-                (None, None, None)              => true,
-                (Some(pname), None, None)       => p.name() == pname,
-                (Some(pname), Some(vers), None) => p.name() == pname && vers.matches(p.version()),
-                (None, None, Some(regex))       => regex.is_match(p.name()),
-
-                (_, _, _) => {
-                    panic!("This should not be possible, either we select packages by name and (optionally) version, or by regex.")
-                },
-            }
-        }).peekable();
-
-    // check if the iterator is empty
-    if r.peek().is_none() {
-        let pname = matches.get_one::<String>("package_name");
-        let pvers = matches.get_one::<String>("package_version");
-        let matching_regexp = matches.get_one::<String>("matching");
-
-        match (pname, pvers, matching_regexp) {
-            (Some(pname), None, None) => return Err(anyhow!("{} not found", pname)),
-            (Some(pname), Some(vers), None) => return Err(anyhow!("{} {} not found", pname, vers)),
-            (None, None, Some(regex)) => return Err(anyhow!("{} regex not found", regex)),
-
-            (_, _, _) => {
-                panic!("This should not be possible, either we select packages by name and (optionally) version, or by regex.")
-            }
-        }
-    }
-
-    let r = r
+    let r = repo
+        .search_packages(&pname, &pvers, &matching_regexp)?
         .flat_map(|p| {
             sc.sources_for(p).into_iter().map(|source| {
                 let download_sema = download_sema.clone();
@@ -274,8 +246,7 @@ pub async fn download(
                             "Cannot download source that is marked for manual download"
                         ))
                         .context(anyhow!("Creating source: {}", source.path().display()))
-                        .context(anyhow!("Downloading source: {}", source.url()))
-                        .map_err(Error::from);
+                        .context(anyhow!("Downloading source: {}", source.url()));
                     }
 
                     if source_path_exists && !force {
@@ -307,10 +278,12 @@ pub async fn download(
 
     if r.is_err() {
         progressbar.lock().await.error().await;
+        return r;
     } else {
         progressbar.lock().await.success().await;
     }
 
-    debug!("r = {:?}", r);
-    r
+    super::verify(matches, config, repo, progressbars).await?;
+
+    Ok(())
 }

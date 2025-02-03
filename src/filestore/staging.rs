@@ -12,12 +12,9 @@ use std::fmt::Debug;
 
 use anyhow::anyhow;
 use anyhow::Context;
-use anyhow::Error;
 use anyhow::Result;
 use futures::stream::Stream;
 use indicatif::ProgressBar;
-#[rustversion::before(1.76)]
-use result_inspect::ResultInspect;
 use tracing::trace;
 
 use crate::filestore::path::ArtifactPath;
@@ -56,7 +53,6 @@ impl StagingStore {
                 trace!("Unpacking archive to {}", dest.display());
                 dest.unpack_archive_here(tar::Archive::new(&bytes[..]))
                     .context("Unpacking TAR")
-                    .map_err(Error::from)
             })
             .context("Concatenating the output bytestream")?
             .into_iter()
@@ -65,8 +61,6 @@ impl StagingStore {
                 if self.0.root_path().is_dir(&path) {
                     None
                 } else {
-                    // Clippy doesn't detect this properly
-                    #[allow(clippy::redundant_clone)]
                     ArtifactPath::new(path.to_path_buf())
                         .inspect(|r| trace!("Loaded from path {} = {:?}", path.display(), r))
                         .with_context(|| anyhow!("Loading from path: {}", path.display()))

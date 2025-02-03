@@ -19,8 +19,6 @@ use anyhow::Error;
 use anyhow::Result;
 use futures::FutureExt;
 use getset::{CopyGetters, Getters};
-#[rustversion::before(1.76)]
-use result_inspect::ResultInspect;
 use shiplift::Container;
 use shiplift::Docker;
 use shiplift::ExecContainerOptions;
@@ -125,7 +123,6 @@ impl Endpoint {
             crate::config::EndpointType::Http => shiplift::Uri::from_str(ep.uri())
                 .map(shiplift::Docker::host)
                 .with_context(|| anyhow!("Connecting to {}", ep.uri()))
-                .map_err(Error::from)
                 .map(|docker| {
                     Endpoint::builder()
                         .name(ep_name.clone())
@@ -183,7 +180,7 @@ impl Endpoint {
                     .with_context(|| anyhow!("Getting API version of endpoint: {}", ep.name))?;
 
                 if !v.contains(&avail.api_version) {
-                    Err(anyhow!("Incompatible Docker API version on endpoint {}: Exepected: {}, Available: [{}]",
+                    Err(anyhow!("Incompatible Docker API version on endpoint {}: Expected: {}, Available: [{}]",
                             ep.name(), avail.api_version, v.join(", ")))
                 } else {
                     Ok(())
@@ -399,6 +396,7 @@ impl From<shiplift::rep::Image> for Image {
     }
 }
 
+#[derive(Clone)]
 pub struct EndpointHandle(Arc<Endpoint>);
 
 impl EndpointHandle {
@@ -545,10 +543,7 @@ impl<'a> PreparedContainer<'a> {
         Ok(create_info)
     }
 
-    async fn copy_source_to_container<'ca>(
-        container: &Container<'ca>,
-        job: &RunnableJob,
-    ) -> Result<()> {
+    async fn copy_source_to_container(container: &Container<'_>, job: &RunnableJob) -> Result<()> {
         use tokio::io::AsyncReadExt;
 
         job.package_sources()
@@ -601,7 +596,6 @@ impl<'a> PreparedContainer<'a> {
                             container.id()
                         )
                     })
-                    .map_err(Error::from)
             })
             .collect::<futures::stream::FuturesUnordered<_>>()
             .collect::<Result<()>>()
@@ -613,13 +607,9 @@ impl<'a> PreparedContainer<'a> {
                 )
             })
             .with_context(|| anyhow!("Copying sources to container {}", container.id()))
-            .map_err(Error::from)
     }
 
-    async fn copy_patches_to_container<'ca>(
-        container: &Container<'ca>,
-        job: &RunnableJob,
-    ) -> Result<()> {
+    async fn copy_patches_to_container(container: &Container<'_>, job: &RunnableJob) -> Result<()> {
         use tokio::io::AsyncReadExt;
 
         debug!(
@@ -655,7 +645,7 @@ impl<'a> PreparedContainer<'a> {
                     .copy_file_into(destination, &buf)
                     .await
                     .map_err(Error::from)
-                    .inspect(|_| trace!("Copying patch {} successfull", patch.display()))
+                    .inspect(|_| trace!("Copying patch {} successful", patch.display()))
                     .with_context(|| {
                         anyhow!(
                             "Copying patch {} to container {}",
@@ -663,19 +653,16 @@ impl<'a> PreparedContainer<'a> {
                             container.id()
                         )
                     })
-                    .map_err(Error::from)
             })
             .collect::<futures::stream::FuturesUnordered<_>>()
             .collect::<Result<()>>()
             .await
-            .map_err(Error::from)
             .inspect(|_| trace!("Copied all patches"))
             .with_context(|| anyhow!("Copying patches to container {}", container.id()))
-            .map_err(Error::from)
     }
 
-    async fn copy_artifacts_to_container<'ca>(
-        container: &Container<'ca>,
+    async fn copy_artifacts_to_container(
+        container: &Container<'_>,
         job: &RunnableJob,
         staging_store: Arc<RwLock<StagingStore>>,
         release_stores: &[Arc<ReleaseStore>],
@@ -754,8 +741,7 @@ impl<'a> PreparedContainer<'a> {
                             container.id(),
                             destination.display()
                         )
-                    })
-                    .map_err(Error::from);
+                    });
                 drop(art); // ensure `art` is moved into closure
                 r
             });
@@ -775,21 +761,16 @@ impl<'a> PreparedContainer<'a> {
                 )
             })
             .with_context(|| anyhow!("Copying artifacts to container {}", container.id()))
-            .map_err(Error::from)
             .map(|_| ())
     }
 
-    async fn copy_script_to_container<'ca>(
-        container: &Container<'ca>,
-        script: &Script,
-    ) -> Result<()> {
+    async fn copy_script_to_container(container: &Container<'_>, script: &Script) -> Result<()> {
         let script_path = PathBuf::from(crate::consts::SCRIPT_PATH);
         container
             .copy_file_into(script_path, script.as_ref().as_bytes())
             .await
             .inspect(|_| trace!("Successfully copied script to container {}", container.id()))
             .with_context(|| anyhow!("Copying the script into container {}", container.id()))
-            .map_err(Error::from)
     }
 
     pub async fn start(self) -> Result<StartedContainer<'a>> {
@@ -888,7 +869,6 @@ impl<'a> StartedContainer<'a> {
                             .with_context(|| anyhow!("Sending log to log sink"))
                             .map(|_| exited_successfully)
                     })
-                    .map_err(Error::from)
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(|r| {
@@ -934,7 +914,7 @@ pub struct ExecutedContainer<'a> {
     exit_info: Option<(bool, Option<String>)>,
 }
 
-impl<'a> ExecutedContainer<'a> {
+impl ExecutedContainer<'_> {
     pub fn container_hash(&self) -> ContainerHash {
         ContainerHash::from(self.create_info.id.clone())
     }
@@ -975,7 +955,6 @@ impl<'a> ExecutedContainer<'a> {
                                 self.create_info.id
                             )
                         })
-                        .map_err(Error::from)
                     });
 
                 let mut writelock = staging_store.write().await;

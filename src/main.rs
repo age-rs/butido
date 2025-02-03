@@ -41,7 +41,6 @@
     while_true
 )]
 #![allow(macro_use_extern_crate)]
-#![allow(unstable_name_collisions)] // TODO: Remove me with the next rustc update (probably)
 
 #[macro_use]
 extern crate diesel;
@@ -54,10 +53,9 @@ use anyhow::Error;
 use anyhow::Result;
 use aquamarine as _;
 use clap::ArgMatches;
-// TODO: Drop the rust-inspect dependency once we bump the MSRV to 1.76:
-#[rustversion::since(1.76)]
-use result_inspect as _;
+use rustversion as _; // This crate is (occasionally) required (e.g., when we need version specific Clippy overrides)
 use tracing::{debug, error};
+use tracing_subscriber::layer::SubscriberExt;
 
 mod cli;
 mod commands;
@@ -91,24 +89,36 @@ pub const VERSION_LONG: &str = concatdoc! {"
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    human_panic::setup_panic!(Metadata {
-        name: env!("CARGO_PKG_NAME").into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        authors: "science-computing ag, opensoftware <opensoftware@science-computing.de>".into(),
-        homepage: "atos.net/de/deutschland/sc".into(),
-    });
+    human_panic::setup_panic!(human_panic::Metadata::new(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    )
+    .authors("science + computing AG, openSoftware <opensoftware@science-computing.de>")
+    .homepage("https://github.com/science-computing/butido")
+    .support("- Via https://github.com/science-computing/butido/issues or mail to opensoftware@science-computing.de"));
 
-    tracing_subscriber::fmt::fmt()
+    let app = cli::cli();
+    let cli = app.get_matches();
+
+    let (chrome_layer, _guard) = match cli
+        .get_flag("tracing-chrome")
+        .then(|| tracing_chrome::ChromeLayerBuilder::new().build())
+    {
+        Some((chrome_layer, guard)) => (Some(chrome_layer), Some(guard)),
+        _ => (None, None),
+    };
+
+    let subscriber = tracing_subscriber::fmt::fmt()
         .with_env_filter(
             tracing_subscriber::filter::EnvFilter::builder()
                 .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
                 .from_env_lossy(),
         )
-        .init();
-    debug!("Debugging enabled");
+        .finish()
+        .with(chrome_layer);
 
-    let app = cli::cli();
-    let cli = app.get_matches();
+    tracing::subscriber::set_global_default(subscriber)?;
+    debug!("Debugging enabled");
 
     // check if the version flag is set
     if cli.get_flag("version") {
@@ -118,7 +128,7 @@ async fn main() -> Result<()> {
 
     let repo = git2::Repository::open(PathBuf::from(".")).map_err(|e| match e.code() {
         git2::ErrorCode::NotFound => {
-            eprintln!("Butido must be executed in the top-level of the git repository");
+            eprintln!("Butido must be executed in the top-level of the Git repository");
             std::process::exit(1)
         }
         _ => Error::from(e),

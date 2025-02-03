@@ -10,7 +10,6 @@
 
 //! Implementation of the 'find-artifact' subcommand
 
-use std::convert::TryFrom;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +30,7 @@ use crate::filestore::ReleaseStore;
 use crate::filestore::StagingStore;
 use crate::package::PackageVersionConstraint;
 use crate::repository::Repository;
-use crate::util::docker::resolve_image_name;
+use crate::util::docker::ImageNameLookup;
 use crate::util::progress::ProgressBars;
 
 /// Implementation of the "find_artifact" subcommand
@@ -51,8 +50,7 @@ pub async fn find_artifact(
         .map(|s| s.to_owned())
         .map(PackageVersionConstraint::try_from)
         .transpose()
-        .context("Parsing package version constraint")
-        .context("A valid package version constraint looks like this: '=1.0.0'")?;
+        .context("Parsing package version constraint")?;
 
     let env_filter = matches
         .get_many::<String>("env_filter")
@@ -64,9 +62,10 @@ pub async fn find_artifact(
         .transpose()?
         .unwrap_or_default();
 
+    let image_name_lookup = ImageNameLookup::create(config.docker().images())?;
     let image_name = matches
         .get_one::<String>("image")
-        .map(|s| resolve_image_name(s, config.docker().images()))
+        .map(|s| image_name_lookup.expand(s))
         .transpose()?;
 
     debug!(
@@ -164,7 +163,7 @@ pub async fn find_artifact(
                         ((a, None), (b, None)) => a.cmp(b),
                     }
                 })
-                .unique_by(|tpl| tpl.0.clone()) // TODO: Dont clone()
+                .unique_by(|tpl| tpl.0.clone()) // TODO: Don't clone()
                 .try_for_each(|(path, releasetime)| {
                     if let Some(time) = releasetime {
                         writeln!(std::io::stdout(), "[{}] {}", time, path.display())

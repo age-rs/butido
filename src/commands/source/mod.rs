@@ -10,7 +10,6 @@
 
 //! Implementation of the 'source' subcommand
 
-use std::convert::TryFrom;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -65,7 +64,7 @@ pub async fn verify(
         .map(|s| s.to_owned())
         .map(PackageName::from);
     let pvers = matches
-        .get_one::<String>("package_version")
+        .get_one::<String>("package_version_constraint")
         .map(|s| s.to_owned())
         .map(PackageVersionConstraint::try_from)
         .transpose()?;
@@ -75,21 +74,7 @@ pub async fn verify(
         .map(|s| crate::commands::util::mk_package_name_regex(s.as_ref()))
         .transpose()?;
 
-    let packages = repo
-        .packages()
-        .filter(|p| {
-            match (pname.as_ref(), pvers.as_ref(), matching_regexp.as_ref()) {
-                (None, None, None)              => true,
-                (Some(pname), None, None)       => p.name() == pname,
-                (Some(pname), Some(vers), None) => p.name() == pname && vers.matches(p.version()),
-                (None, None, Some(regex))       => regex.is_match(p.name()),
-
-                (_, _, _) => {
-                    panic!("This should not be possible, either we select packages by name and (optionally) version, or by regex.")
-                },
-            }
-        })
-        .inspect(|p| trace!("Found for verification: {} {}", p.name(), p.version()));
+    let packages = repo.search_packages(&pname, &pvers, &matching_regexp)?;
 
     verify_impl(packages, &sc, &progressbars).await
 }
@@ -195,7 +180,7 @@ pub async fn url(matches: &ArgMatches, repo: Repository) -> Result<()> {
         .map(|s| s.to_owned())
         .map(PackageName::from);
     let pvers = matches
-        .get_one::<String>("package_version")
+        .get_one::<String>("package_version_constraint")
         .map(|s| s.to_owned())
         .map(PackageVersionConstraint::try_from)
         .transpose()?;
@@ -231,7 +216,7 @@ async fn of(matches: &ArgMatches, config: &Configuration, repo: Repository) -> R
         .map(|s| s.to_owned())
         .map(PackageName::from);
     let pvers = matches
-        .get_one::<String>("package_version")
+        .get_one::<String>("package_version_constraint")
         .map(|s| s.to_owned())
         .map(PackageVersionConstraint::try_from)
         .transpose()?;
